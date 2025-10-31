@@ -2,3 +2,4 @@ yt_dlp
 discord
 schedule
 PyNaCl
+apscheduler
