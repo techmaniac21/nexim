@@ -10,7 +10,23 @@ import sys
 import threading
 import discord
 from discord.ext import commands, tasks
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import re
+import logging
+import logging.handlers
+
+discordLogger = logging.getLogger('discord')
+discordLogger.setLevel(logging.INFO)
+
+handler = logging.StreamHandler(stream=sys.stdout)
+
+dt_fmt = '%Y-%m-%d %H:%M:%S'
+formatter = logging.Formatter('[{asctime}] [{levelname:<8}] {name}: {message}', dt_fmt, style='{')
+handler.setFormatter(formatter)
+discordLogger.addHandler(handler)
+
+logger = logging.getLogger('music_bot')
+logger.setLevel(logging.DEBUG)
+logger.addHandler(handler)
 
 stop = False
 
@@ -50,6 +66,12 @@ allJoinedChannels = []
 
 def download_audio(item):
     path = "tmp/" + item.ytVideoID
+
+    if os.path.exists(path + ".mp3"):
+        logger.info("file already exists, skipping download")
+        item.status = PLAYBACK_STATUS.QUEUED
+        return
+
     ydl_opts = {
         'format': 'bestaudio/best',
         'postprocessors': [{
@@ -58,14 +80,14 @@ def download_audio(item):
             'preferredquality': '192',
         }],
         'outtmpl': path,
-        'logtostderr': True,
-        'no-playlist': True #TODO: This isn't working yet
+        'logger': logger,
+
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         try:
             ydl.download([item.url])
         except Exception as e:
-            print("download failed")
+            logger.info("download failed")
             item.status = PLAYBACK_STATUS.DOWNLOAD_FAILED
             return
     
@@ -131,6 +153,7 @@ async def join_voice_channel(ctx: commands.Context):
 
 @bot.command(name="ping")
 async def ping(ctx: commands.Context):
+    logger.info("Ping command invoked")
     await ctx.send("Pong!")
 
 @bot.command(name="loopCheck")
@@ -160,26 +183,76 @@ async def setVolume(ctx: commands.Context, volume: int):
 
 @bot.command()
 async def play(ctx: commands.Context, url: str):
-    channel_to_join = ctx.voice_client.channel
+    # Check to see if checkPlaylist is actually running before we start trying to play
+    if not checkPlaylist.is_running():
+        checkPlaylist.start()
+
+    # Determine current voice client for this guild
     voice_client = ctx.voice_client
+
+    # Find the invoking user's voice channel
+    user = ctx.author
+    user_voice_channel = None
+    if isinstance(user, discord.Member) and user.voice and user.voice.channel:
+        user_voice_channel = user.voice.channel
+
+    if user_voice_channel is None:
+        await ctx.send("You must be in a voice channel for me to join.")
+        return
+
+    # If bot is not connected, connect to the user's channel
     if voice_client is None:
+        try:
+            voice_client = await user_voice_channel.connect()
+        except Exception as e:
+            await ctx.send("Failed to connect to your voice channel.")
+            return
+    else:
+        # If bot is connected but in a different channel, move to the user's channel
+        if voice_client.channel != user_voice_channel:
+            try:
+                await voice_client.move_to(user_voice_channel)
+            except Exception as e:
+                await ctx.send("Failed to move to your voice channel.")
+                return
 
-        voice_channel = discord.utils.get(ctx.guild.voice_channels)
-        user_invoked = ctx.message.author
+    channel_to_join = user_voice_channel
 
-        channel_to_join = discord.utils.get(ctx.guild.voice_channels, members=[user_invoked])
-
-        voice_client = await voice_channel.connect()
-
-        # if first_voice_channel is None:
-        #     voice_client = await join_voice_channel(ctx)
-        #     voice_channel = discord.utils.get(bot.voice_clients, guild=ctx.guild)
-
-    object = youtubeObject(url=url, channel=channel_to_join, client=voice_client) # TODO: Should voice_client be in object?
+    # Fix URL to a standard YouTube link format (by taking video ID and implementing it into standard URL)
+    youtubeId = re.search(r'(.*watch\?v=|.*youtu.be\/)([a-zA-Z0-9_-]*)(&|\?)?', url)
+    if youtubeId is None:
+        await ctx.send("I can't find a valid video ID in that URL, ensure that the Youtube link includes a video ID (e.g. watch?v=XXXXXX or youtu.be/XXXXXX).")
+        return
     
-    await ctx.send("url added to playlist array")
+    logger.info("extracted youtube id: " + youtubeId[2] + " from url " + url)
 
-    playlist.append(object)
+    url = "https://www.youtube.com/watch?v=" + youtubeId[2]
+
+    yt_obj = youtubeObject(url=url, channel=channel_to_join, client=voice_client)  # TODO: Should voice_client be in object?
+    await ctx.send("Item added to playlist!")
+    playlist.append(yt_obj)
+
+@bot.command
+async def move(ctx: commands.Context):
+    voice_client = ctx.voice_client
+
+    # Find the invoking user's voice channel
+    user = ctx.author
+    user_voice_channel = None
+    if isinstance(user, discord.Member) and user.voice and user.voice.channel:
+        user_voice_channel = user.voice.channel
+
+    if user_voice_channel is None:
+        await ctx.send("Target voice channel not found. Am I able to see the channel?")
+        return
+
+    if voice_client is None:
+        await ctx.send("I'm not currently in a voice channel. I have to be in a voice channel to be moved. Play something first!")
+        return
+
+    # Moving the bot to the target voice channel
+    await voice_client.move_to(user_voice_channel)
+    await ctx.send(f"Moved to voice channel: {user_voice_channel.name}")
 
 @tasks.loop(seconds=1)
 async def checkPlaylist():
@@ -189,13 +262,16 @@ async def checkPlaylist():
                 item.status = PLAYBACK_STATUS.DOWNLOADING
                 thread = threading.Thread(target=download_audio, args=[item])
                 thread.start()
-                print("started download thread")
+                logger.info("started download thread")
             case PLAYBACK_STATUS.DOWNLOADING:
                 pass
             case PLAYBACK_STATUS.DOWNLOAD_FAILED:
-                print("err download failed everything is died")
+                logger.info("err download failed everything is died")
 
                 #TODO: Handle failed download (is anything throwing it yet?)
+                logger.info("download failed for item: " + item.url)
+                logger.info("removing item from playlist")
+                playlist.remove(item)
             case PLAYBACK_STATUS.QUEUED:
                 channelToPlayTo = item.channel.id
                 shouldPlayNow = True
@@ -203,48 +279,64 @@ async def checkPlaylist():
                     if item2.channel.id == channelToPlayTo and item2.status == PLAYBACK_STATUS.PLAYING:
                         shouldPlayNow = False
                 if shouldPlayNow:
-                    print("need to play next track")
+                    logger.info("need to play next track")
                     voice_client = item.client
                     path = "tmp/" + item.ytVideoID + ".mp3"
                     try:
                         playedObject = discord.FFmpegPCMAudio(path)
                         voice_client.play(playedObject, signal_type="music", fec=False)
                     except Exception as e:
-                        print("error loading audio into discord")
+                        logger.info("error loading audio into discord")
                         item.status = PLAYBACK_STATUS.FINISHED
                         continue
                     item.status = PLAYBACK_STATUS.PLAYING
-                    print("started playing track")
+                    logger.info("started playing track")
             case PLAYBACK_STATUS.PLAYING:
                 if not item.client.is_playing():
                     item.status = PLAYBACK_STATUS.FINISHED
-                    print("track finished playing")
-                # TODO: Figure out how to determine track is done playing
+                    logger.info("track finished playing or was skipped")
             case PLAYBACK_STATUS.FINISHED:
                 playlist.remove(item)
-                print("finished playing track, removed from playlist")
-                # TODO: Remove already played track from queue
+                logger.info("finished playing track, removed from playlist")
 
 #TODO: Allow users to skip songs in the playlist
 
-# schedule.every().seconds.do(checkPlaylist)
+@bot.command()
+async def skip(ctx: commands.Context):
+    voice_client = ctx.voice_client
 
-# def scheduleThread():
-#     while(stop == False):
-#         schedule.run_pending() #TODO: Should we do hooks instead?
-#         sleep(5)
+    if voice_client is None or not voice_client.is_playing():
+        await ctx.send("Not currently playing any audio.")
+        return
 
-# scheduleThreadRuntime = threading.Thread(target=scheduleThread)
-# scheduleThreadRuntime.start()
+    voice_client.stop()
+    await ctx.send("Skipped the current track.")
+
+@bot.command()
+async def showPlaylist(ctx: commands.Context):
+    playlistToDisplay = []
+    for index, item in enumerate(playlist, start=1):
+        if item.status != PLAYBACK_STATUS.FINISHED and item.status != PLAYBACK_STATUS.CANCELLED:
+            playlistToDisplay.append(item)
+    
+    if playlistToDisplay == []:
+        await ctx.send("The playlist is currently empty.")
+        return
+
+    message = "Current Playlist:\n"
+    for index, item in enumerate(playlistToDisplay, start=1):
+        message += f"{index}. {item.url} - Status: {item.status.name}\n"
+
+    await ctx.send(message, suppress_embeds=True)
 
 def signal_handler(sig, frame):
     global stop
-    print('You pressed Ctrl+C!')
+    logger.info('You pressed Ctrl+C!')
     stop = True
+    checkPlaylist.stop()
     sys.exit(0)
 
 signal.signal(signal.SIGINT, signal_handler)
  
 # Run the bot
-bot.run(os.getenv('DISCORD_BOT_TOKEN', 'null'))
-checkPlaylist.start()
+bot.run(os.getenv('DISCORD_BOT_TOKEN', 'null'), log_handler=None)

@@ -15,7 +15,7 @@ RUN apt-get update \
         libsodium-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements (note: the project file is named reqirements.txt)
+# Copy requirements
 COPY requirements.txt ./
 
 # Upgrade pip and install Python dependencies
