@@ -9,7 +9,8 @@ import signal
 import sys
 import threading
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 stop = False
 
@@ -26,6 +27,7 @@ class PLAYBACK_STATUS(Enum):
 class youtubeObject:
     status = PLAYBACK_STATUS.NEW
     url = None
+    ytVideoID = None
     audioData = io.BytesIO()
     channel = None
     client = None
@@ -33,6 +35,7 @@ class youtubeObject:
     def __init__(self, url, channel, client, status=None):
         if status != None:
             self.status = status
+        self.ytVideoID = url.split("watch?v=")[-1]
         self.url = url
         self.channel = channel
         self.client = client
@@ -46,6 +49,7 @@ playlist = []
 allJoinedChannels = []
 
 def download_audio(item):
+    path = "tmp/" + item.ytVideoID
     ydl_opts = {
         'format': 'bestaudio/best',
         'postprocessors': [{
@@ -53,15 +57,18 @@ def download_audio(item):
             'preferredcodec': 'mp3',
             'preferredquality': '192',
         }],
-        'outtmpl': '-',
-        'logtostderr': True
+        'outtmpl': path,
+        'logtostderr': True,
+        'no-playlist': True #TODO: This isn't working yet
     }
-    downloadBuffer = io.BytesIO()
-    with redirect_stdout(downloadBuffer), yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([item.url]) #FIXME: Current buffer retrieves pre-processed bytestream (I think?)
-        # Further testing shows that outtmpl actually writes what looks to be a avc1 webm stream and ignores postprocessing params
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        try:
+            ydl.download([item.url])
+        except Exception as e:
+            print("download failed")
+            item.status = PLAYBACK_STATUS.DOWNLOAD_FAILED
+            return
     
-    item.audioData = downloadBuffer
     item.status = PLAYBACK_STATUS.QUEUED
 
 url = 'https://music.youtube.com/watch?v=17JZKJlx5uI'
@@ -95,7 +102,7 @@ async def join_voice_channel(ctx: commands.Context, channel_id: int):
     # Joining the voice channel
     voice_client = await voice_channel.connect()
 
-    voice_client.play(discord.FFmpegOpusAudio("audio.mp3"))
+    # voice_client.play(discord.FFmpegOpusAudio("audio.mp3"))
 
     await ctx.send(f"Joined voice channel: {voice_channel.name}")
 
@@ -126,29 +133,63 @@ async def join_voice_channel(ctx: commands.Context):
 async def ping(ctx: commands.Context):
     await ctx.send("Pong!")
 
+@bot.command(name="loopCheck")
+async def loopCheck(ctx: commands.Context):
+    string = "Current Loop: " + str(checkPlaylist.current_loop) + "\nNext Iteration" + str(checkPlaylist.next_iteration) + "\nIs Running: " + str(checkPlaylist.is_running())
+    await ctx.send(string)
+
+@bot.command(name="startLoop") # TODO: Why is this required to start the loop? Should start with checkPlaylist.start()?
+async def startLoop(ctx: commands.Context):
+    if not checkPlaylist.is_running():
+        checkPlaylist.start()
+        await ctx.send("Started Playlist Loop")
+    else:
+        await ctx.send("Playlist Loop is already running")
+
+@bot.command(name="setVolume") #TODO: Broken, needs testing and fixing
+async def setVolume(ctx: commands.Context, volume: int):
+    voice_client = discord.utils.get(bot.voice_clients, guild=ctx.guild)
+    if voice_client is None:
+        await ctx.send("Not currently in a voice channel.")
+        return
+    if volume < 0 or volume > 100:
+        await ctx.send("Volume must be between 0 and 100.")
+        return
+    voice_client.source.volume = volume / 100.0
+    await ctx.send(f"Volume set to {volume}%")
+
 @bot.command()
 async def play(ctx: commands.Context, url: str):
-    voice_channel = discord.utils.get(ctx.guild.voice_channels)
+    channel_to_join = ctx.voice_client.channel
+    voice_client = ctx.voice_client
+    if voice_client is None:
 
-    voice_client = await voice_channel.connect()
+        voice_channel = discord.utils.get(ctx.guild.voice_channels)
+        user_invoked = ctx.message.author
 
-    # if first_voice_channel is None:
-    #     voice_client = await join_voice_channel(ctx)
-    #     voice_channel = discord.utils.get(bot.voice_clients, guild=ctx.guild)
+        channel_to_join = discord.utils.get(ctx.guild.voice_channels, members=[user_invoked])
 
-    object = youtubeObject(url=url, channel=voice_channel, client=voice_client) # TODO: Should voice_client be in object?
+        voice_client = await voice_channel.connect()
+
+        # if first_voice_channel is None:
+        #     voice_client = await join_voice_channel(ctx)
+        #     voice_channel = discord.utils.get(bot.voice_clients, guild=ctx.guild)
+
+    object = youtubeObject(url=url, channel=channel_to_join, client=voice_client) # TODO: Should voice_client be in object?
     
     await ctx.send("url added to playlist array")
 
     playlist.append(object)
-    
-def checkPlaylist():
+
+@tasks.loop(seconds=1)
+async def checkPlaylist():
     for item in playlist:
         match item.status:
             case PLAYBACK_STATUS.NEW:
                 item.status = PLAYBACK_STATUS.DOWNLOADING
                 thread = threading.Thread(target=download_audio, args=[item])
                 thread.start()
+                print("started download thread")
             case PLAYBACK_STATUS.DOWNLOADING:
                 pass
             case PLAYBACK_STATUS.DOWNLOAD_FAILED:
@@ -164,24 +205,37 @@ def checkPlaylist():
                 if shouldPlayNow:
                     print("need to play next track")
                     voice_client = item.client
-                    audioData = item.audioData.read()
-                    voice_client.play(discord.FFmpegOpusAudio(audioData)) #FIXME: Currently exceptions with bad bytestream
+                    path = "tmp/" + item.ytVideoID + ".mp3"
+                    try:
+                        playedObject = discord.FFmpegPCMAudio(path)
+                        voice_client.play(playedObject, signal_type="music", fec=False)
+                    except Exception as e:
+                        print("error loading audio into discord")
+                        item.status = PLAYBACK_STATUS.FINISHED
+                        continue
+                    item.status = PLAYBACK_STATUS.PLAYING
+                    print("started playing track")
             case PLAYBACK_STATUS.PLAYING:
-                pass
+                if not item.client.is_playing():
+                    item.status = PLAYBACK_STATUS.FINISHED
+                    print("track finished playing")
                 # TODO: Figure out how to determine track is done playing
             case PLAYBACK_STATUS.FINISHED:
-                pass
+                playlist.remove(item)
+                print("finished playing track, removed from playlist")
                 # TODO: Remove already played track from queue
 
-schedule.every().seconds.do(checkPlaylist)
+#TODO: Allow users to skip songs in the playlist
 
-def scheduleThread():
-    while(stop == False):
-        schedule.run_pending() #TODO: Should we do hooks instead?
-        sleep(1)
+# schedule.every().seconds.do(checkPlaylist)
 
-scheduleThreadRuntime = threading.Thread(target=scheduleThread)
-scheduleThreadRuntime.start()
+# def scheduleThread():
+#     while(stop == False):
+#         schedule.run_pending() #TODO: Should we do hooks instead?
+#         sleep(5)
+
+# scheduleThreadRuntime = threading.Thread(target=scheduleThread)
+# scheduleThreadRuntime.start()
 
 def signal_handler(sig, frame):
     global stop
@@ -193,3 +247,4 @@ signal.signal(signal.SIGINT, signal_handler)
  
 # Run the bot
 bot.run(os.getenv('DISCORD_BOT_TOKEN', 'null'))
+checkPlaylist.start()

@@ -6,7 +6,7 @@ Nexim is an open source Discord bot designed to be able to play YouTube videos (
 * [ ] ensuring efficient audio transcode before playback
 * [ ] proper temp audio file storage (possibly in mem)
 * [ ] breaking out bot objects to allow multi-server playback
-* [ ] queueing system
+* [x] queueing system
 * [ ] cli to interact with bot
 * [ ] search function
 * [ ] auto detection of correct vc/configuration of default vc
@@ -24,3 +24,27 @@ Nexim is an open source Discord bot designed to be able to play YouTube videos (
 
 This bot is being written to respond to many music bots losing their ability to play YouTube videos as music, given that Discord has removed their "verified" status if they did not comply. THIS BOT IS NOT DESIGNED FOR USE AS AN OFFICIAL BOT, as this may be against YouTube's Terms of Service. The bot is instead designed for individual users to utilize as they see fit.
 
+## Docker
+
+A minimal Dockerfile is included to build and run the bot in a container.
+
+Build the image (from repository root):
+
+```powershell
+docker build -t nexim:latest .
+```
+
+Run the container (preferred: pass your Discord token via env):
+
+```powershell
+docker run -e DISCORD_BOT_TOKEN="your_token_here" --rm nexim:latest
+```
+
+If you need to persist or access the `tmp/` folder (the bot downloads audio there), mount a volume:
+
+```powershell
+docker run -e DISCORD_BOT_TOKEN="your_token_here" -v ${PWD}/tmp:/app/tmp --rm nexim:latest
+```
+
+Notes:
+- The Docker image installs `ffmpeg` and some build tools required by certain dependencies.
