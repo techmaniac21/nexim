@@ -1,4 +1,3 @@
-from enum import Enum
 import io
 import os
 import schedule
@@ -11,58 +10,22 @@ import threading
 import discord
 from discord.ext import commands, tasks
 import re
-import logging
-import logging.handlers
 
-discordLogger = logging.getLogger('discord')
-discordLogger.setLevel(logging.INFO)
+# Centralized logging configuration (consistent formatting + handlers)
+from logging_config import logger, discordLogger
 
-handler = logging.StreamHandler(stream=sys.stdout)
+# Shared runtime objects and helpers
+from state import (
+    PLAYBACK_STATUS,
+    append_playlist,
+    get_playlist_snapshot,
+    remove_playlist,
+)
 
-dt_fmt = '%Y-%m-%d %H:%M:%S'
-formatter = logging.Formatter('[{asctime}] [{levelname:<8}] {name}: {message}', dt_fmt, style='{')
-handler.setFormatter(formatter)
-discordLogger.addHandler(handler)
-
-logger = logging.getLogger('music_bot')
-logger.setLevel(logging.DEBUG)
-logger.addHandler(handler)
+# Domain models (kept in a separate module to avoid cluttering main)
+from models import youtubeObject, joinedChannel
 
 stop = False
-
-class PLAYBACK_STATUS(Enum):
-    NEW = 0
-    DOWNLOADING = 1
-    QUEUED = 2
-    PLAYING = 3
-    FINISHED = 4
-    CANCELLED = 5
-    # Fail Codes
-    DOWNLOAD_FAILED=100
-
-class youtubeObject:
-    status = PLAYBACK_STATUS.NEW
-    url = None
-    ytVideoID = None
-    audioData = io.BytesIO()
-    channel = None
-    client = None
-
-    def __init__(self, url, channel, client, status=None):
-        if status != None:
-            self.status = status
-        self.ytVideoID = url.split("watch?v=")[-1]
-        self.url = url
-        self.channel = channel
-        self.client = client
-
-class joinedChannel:
-    channelId = -1
-    playlist = []
-
-playlist = []
-
-allJoinedChannels = []
 
 def download_audio(item):
     path = "tmp/" + item.ytVideoID
@@ -230,7 +193,7 @@ async def play(ctx: commands.Context, url: str):
 
     yt_obj = youtubeObject(url=url, channel=channel_to_join, client=voice_client)  # TODO: Should voice_client be in object?
     await ctx.send("Item added to playlist!")
-    playlist.append(yt_obj)
+    append_playlist(yt_obj)
 
 @bot.command
 async def move(ctx: commands.Context):
@@ -256,7 +219,9 @@ async def move(ctx: commands.Context):
 
 @tasks.loop(seconds=1)
 async def checkPlaylist():
-    for item in playlist:
+    # Iterate a snapshot of the playlist to avoid holding the lock for long
+    # and to allow safe modification via the helper functions.
+    for item in get_playlist_snapshot():
         match item.status:
             case PLAYBACK_STATUS.NEW:
                 item.status = PLAYBACK_STATUS.DOWNLOADING
@@ -271,11 +236,12 @@ async def checkPlaylist():
                 #TODO: Handle failed download (is anything throwing it yet?)
                 logger.info("download failed for item: " + item.url)
                 logger.info("removing item from playlist")
-                playlist.remove(item)
+                remove_playlist(item)
             case PLAYBACK_STATUS.QUEUED:
                 channelToPlayTo = item.channel.id
                 shouldPlayNow = True
-                for item2 in playlist:
+                # Check the playing state using a snapshot to avoid races
+                for item2 in get_playlist_snapshot():
                     if item2.channel.id == channelToPlayTo and item2.status == PLAYBACK_STATUS.PLAYING:
                         shouldPlayNow = False
                 if shouldPlayNow:
@@ -296,7 +262,7 @@ async def checkPlaylist():
                     item.status = PLAYBACK_STATUS.FINISHED
                     logger.info("track finished playing or was skipped")
             case PLAYBACK_STATUS.FINISHED:
-                playlist.remove(item)
+                remove_playlist(item)
                 logger.info("finished playing track, removed from playlist")
 
 #TODO: Allow users to skip songs in the playlist
@@ -315,7 +281,7 @@ async def skip(ctx: commands.Context):
 @bot.command()
 async def showPlaylist(ctx: commands.Context):
     playlistToDisplay = []
-    for index, item in enumerate(playlist, start=1):
+    for index, item in enumerate(get_playlist_snapshot(), start=1):
         if item.status != PLAYBACK_STATUS.FINISHED and item.status != PLAYBACK_STATUS.CANCELLED:
             playlistToDisplay.append(item)
     
@@ -336,7 +302,16 @@ def signal_handler(sig, frame):
     checkPlaylist.stop()
     sys.exit(0)
 
-signal.signal(signal.SIGINT, signal_handler)
- 
-# Run the bot
-bot.run(os.getenv('DISCORD_BOT_TOKEN', 'null'), log_handler=None)
+# signal.signal(signal.SIGINT, signal_handler)
+
+def run_webserver():
+    from webserver.app import app
+    app.run(host='0.0.0.0', port=8080, use_reloader=False)
+
+if __name__ == "__main__":
+    # Start the web server in a separate thread
+    web_thread = threading.Thread(target=run_webserver, daemon=True)
+    web_thread.start()
+
+    # Run the bot
+    bot.run(os.getenv('DISCORD_BOT_TOKEN', 'null'), log_handler=None)
