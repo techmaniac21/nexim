@@ -18,6 +18,7 @@
         <h2>Bot Status</h2>
         <ul>
             <li><strong>Playlist Length:</strong> <span id="playlist-length">0</span></li>
+            <li><strong>Guild Count:</strong> <span id="guild-count">0</span></li>
         </ul>
     </div>
     <div class="section">
@@ -44,10 +45,18 @@
                 lengthSpan.textContent = data.length;
                 data.forEach((item, idx) => {
                     const row = document.createElement('tr');
-                    row.innerHTML = `<td>${idx + 1}</td><td>${item.url}</td><td>${item.status}</td>`;
+                    const title = item.title ? item.title : 'Unknown title';
+                    const link = `<a href="${item.url}" target="_blank">${title}</a>`;
+                    row.innerHTML = `<td>${idx + 1}</td><td>${link}</td><td>${item.status}</td>`;
                     table.appendChild(row);
                 });
             });
+            // Fetch guild count
+            fetch('/guilds')
+                .then(r => r.json())
+                .then(g => {
+                    document.getElementById('guild-count').textContent = g.guilds;
+                });
     </script>
 </body>
 </html>

@@ -17,6 +17,7 @@ class youtubeObject:
     url = None
     ytVideoID = None
     audioData = io.BytesIO()
+    title = None
     channel = None
     client = None
 

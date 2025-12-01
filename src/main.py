@@ -20,6 +20,7 @@ from state import (
     append_playlist,
     get_playlist_snapshot,
     remove_playlist,
+    bot as state_bot,
 )
 
 # Domain models (kept in a separate module to avoid cluttering main)
@@ -48,6 +49,10 @@ def download_audio(item):
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         try:
+            # yt_dlp returns a list of info dicts; we only need the first
+            info = ydl.extract_info(item.url, download=False)
+            # Store title for later display
+            item.title = info.get('title')
             ydl.download([item.url])
         except Exception as e:
             logger.info("download failed")
@@ -314,4 +319,5 @@ if __name__ == "__main__":
     web_thread.start()
 
     # Run the bot
+    state_bot = bot  # expose bot instance to state module
     bot.run(os.getenv('DISCORD_BOT_TOKEN', 'null'), log_handler=None)

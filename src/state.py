@@ -39,6 +39,11 @@ class PLAYBACK_STATUS(Enum):
 playlist: List[object] = []
 playlist_lock = threading.RLock()
 
+# Reference to the Discord bot instance. This is set from main.py after the
+# bot is instantiated so that other modules (e.g. the web server) can
+# introspect the bot without creating a circular import.
+bot = None
+
 
 def get_playlist_snapshot():
     """Return a shallow copy of the playlist under lock for safe iteration."""
